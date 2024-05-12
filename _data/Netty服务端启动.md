@@ -1,4 +1,29 @@
-常见的netty启动代码：
+netty服务端启动分为以下几个过程：
+
+1. 创建服务端channel
+2. 初始化服务端channel
+3. 注册selector
+4. 服务端端口的绑定
+
+对应我们自己实现nioserver，就是这一段代码：
+
+``` java
+// 为了接收连接，我们需要一个 ServerSocketChannel
+ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
+// 将 ServerSocketChannel 设置为非阻塞的 。我们必须对每一个要使用的套接字通道调用这个方法，否则异步 I/O 就不能工作。
+serverSocketChannel.configureBlocking(false);
+
+// 将新打开的 ServerSocketChannels 注册到 Selector上
+Selector selector = Selector.open();
+SelectionKey key = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+
+// 绑定端口地址
+ServerSocket serverSocket = serverSocketChannel.socket(); // 说明serverSocketChannel就是包装了serverSocket
+InetSocketAddress address = new InetSocketAddress("0.0.0.0",8989);
+serverSocket.bind(address);
+```
+
+先看常见的netty启动代码：
 
 ``` java
 private static final EventLoopGroup bossGroup = new NioEventLoopGroup();
@@ -70,6 +95,15 @@ netty服务端启动的步骤：
 
 ## 创建服务端channel
 
+相对于基本的流程，这里就是做了这两步骤：
+
+```javaj
+// 为了接收连接，我们需要一个 ServerSocketChannel
+ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
+// 将 ServerSocketChannel 设置为非阻塞的 。我们必须对每一个要使用的套接字通道调用这个方法，否则异步 I/O 就不能工作。
+serverSocketChannel.configureBlocking(false);
+```
+
 <img src="https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240422112507772.png" alt="image-20240422112507772" style="zoom: 33%;"/>
 
 创建服务端channel是从用户代码的bind方法进入的，一直往下点，就能看到initialAndRegister方法，
@@ -106,6 +140,8 @@ NioServerSocketChannel的构造函数：
 
 先创建jdk底层的channel：
 
+类比：`ServerSocketChannel serverSocketChannel = ServerSocketChannel.open()`
+
 ![image-20240424111643708](https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240424111643708.png)
 
 * ServerSocketChannel
@@ -115,19 +151,27 @@ NioServerSocketChannel的构造函数：
 
 ![image-20240424112641863](https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240424112641863.png)
 
+点进super，AbstractChannel是客户端和服务端共用的基类，他们都会创建id，unsafe和pipeline（其中unsafe和tcp底层读写有关）
+
+这段代码就是为这个服务端channel添加一个id，一个unsafe、一个pipeline。
+
 > channel 和 javaChannel()是一个对象
 
 调用NioServerSocketChannelConfig的构造函数，tcp参数配置类
 
 ![image-20240424140659151](https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240424140659151.png)
 
-赋值创建的ServerSocketChannel给成员变量ch，然后配置ch的属性为非阻塞的。如果不使用netty进行网络编程的话，那么这一步是必不可少的？
+赋值创建的ServerSocketChannel给成员变量ch，然后配置ch的属性为非阻塞的:
+
+标准步骤：创建完成后设置为非阻塞`ch.configureBlocking(false)`
 
 ![image-20240424140758892](https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240424140758892.png)
 
 > 反正要抛出异常停止程序了，在catch中还有异常catch就打印一个错误日志
 
 ## 初始化Channel
+
+初始化就是保存用户设置的参数，以及创建pipeline
 
 <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424212939907.png" alt="image-20240424212939907" style="zoom:40%;" />
 
@@ -161,9 +205,16 @@ ServerBootstrapAcceptor是一个特殊的handler，netty默认添加的，这是
 
 ## 注册Selector
 
-把channel放在事件轮训器上面：
+初始化完成之后，就是**把创建的channel注册到事件轮询器selector上面**去。但是在注册到selector之前做了绑定线程的操作。
 
-![image-20240424222839402](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424222839402.png)
+把channel放在事件轮训器上面，也就是：
+
+```
+Selector selector = Selector.open();
+SelectionKey key = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+```
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424222839402.png" alt="image-20240424222839402" style="zoom:40%;" />
 
 还是从initAndRegister方法开始：
 
@@ -175,7 +226,7 @@ ServerBootstrapAcceptor是一个特殊的handler，netty默认添加的，这是
 
 点进register方法：
 
-`AbstractChannel.this.eventLoop = eventLoop`这行的含义就是告诉channel之后的所有的操作都交给eventLoop 
+绑定线程是这行代码：`AbstractChannel.this.eventLoop = eventLoop`，含义就是告诉channel之后的所有的操作都交给这个eventLoop 。后续所有的io操作，都是通过这个eventLoop来处理。
 
 ![image-20240424223708977](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424223708977.png)
 
@@ -183,7 +234,7 @@ ServerBootstrapAcceptor是一个特殊的handler，netty默认添加的，这是
 
 ![image-20240424225044969](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424225044969.png)
 
-来到具体的执行地方，可以看到还是调用了jdk底层的方法将channel绑定到了selector上面  
+来到具体的执行地方，可以看到还是调用了jdk底层的方法将channel绑定到了selector上面  ：
 
 ![image-20240424224152014](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424224152014.png)
 
@@ -191,7 +242,9 @@ ServerBootstrapAcceptor是一个特殊的handler，netty默认添加的，这是
 >
 > selector当轮训到这个channel上面有的io操作的时候，可以直接将attachment拿出来，针对netty的niochannel做一些事件的传播处理 
 
-接着就是执行doRegister中的两个回调方法：
+注册完成之后，netty又做了两件事`invokeHandlerAddedIfNeeded()``和fireChannelRegistered()`，invokeHandlerAddedIfNeeded提供了回调方法，后者传播了事件
+
+选择AbstractNioChannel的doregister()：
 
 ![image-20240424225254314](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424225254314.png)
 
@@ -201,9 +254,21 @@ ServerBootstrapAcceptor是一个特殊的handler，netty默认添加的，这是
 
 ## 端口绑定
 
+端口绑定大部分是在AbstractChannel的内部类AbstractUnsafe的`bind()`这个方法里面完成的。主要完成了两件事情：
+
+1. doBind()最终调用到javaChannel.bind()调用jdk底层绑定端口，可以看后面代码是不是这么做的：
+
+   ``` java
+   ServerSocket serverSocket = serverSocketChannel.socket(); // 说明serverSocketChannel就是包装了serverSocket
+   InetSocketAddress address = new InetSocketAddress("0.0.0.0",8989);
+   serverSocket.bind(address);
+   ```
+
+2. pipeline的channelActive传播事件，最终会调用到HeadContext.readIfIsAutoRead()（这个方法的作用是把原来注册到selector上面的事件重新绑定为accept事件，这样子有新连接进来netty就会接受这个时间并交给netty处理）。
+
 ![image-20240424225900813](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424225900813.png)
 
-还是回到doBind方法：
+在AbstractBoostrap的`doBind()`这个方法的`initAndRegister()`调用后面，有一个`doBind0()`，一层一层进去，到达AbstractChannelHeadContext的这个方法：
 
 ![image-20240424230138984](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424230138984.png)
 
@@ -249,3 +314,57 @@ if (!wasActive && isActive()) { // 之前没有绑定，现在绑定了，那么
 然后会回到这里来？
 
 ![image-20240424232323661](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424232323661.png)
+
+> readIfIsAutoRead做了什么？
+>
+> 在把accept事件注册上去这里，点击进去readIfIsAutoRead()这个方法，还是实现HeadContext的read方法，AbstractNioChannel的doBegainRead()方法：
+>
+> ``` java
+> @Override
+> protected void doBeginRead() throws Exception {
+>   // Channel.read() or ChannelHandlerContext.read() was called
+>   final SelectionKey selectionKey = this.selectionKey;
+>   if (!selectionKey.isValid()) {
+>     return;
+>   }
+> 
+>   readPending = true;
+> 
+>   final int interestOps = selectionKey.interestOps();
+>   if ((interestOps & readInterestOp) == 0) {
+>     selectionKey.interestOps(interestOps | readInterestOp);
+>   }
+> }
+> ```
+>
+> 首先我们看final int interestOps = selectionKey.interestOps();这段代码出来什么？
+>
+> 在我们把jdk底层的channel注册到selector上的时候，我们并不关心什么事件，之前的文章讲过，所以这里的interestOps是0。
+>
+> 我们看看readInterestOp从哪里来。在这里我们首先明确的是，这里的read并不是指“读事件”，而是“读到的事件”，这个“读到的事件”有可能是读事件、写事件、accept事件。其实这个readInterestOp是从NioServerSocketChannel这个类的构造函数来的，之前我们可能有点印象，在创建NioServerSocketChannel的时候：
+>
+> ``` java
+> /** Create a new instance using the given {@link ServerSocketChannel}. */
+> public NioServerSocketChannel(ServerSocketChannel channel) {
+>   super(null, channel, SelectionKey.OP_ACCEPT);
+>   config = new NioServerSocketChannelConfig(this, javaChannel().socket());
+> }
+> ```
+>
+>
+> 也就是这个readInterestOp就是SelectionKey.OP_ACCEPT。
+>
+> 那么  (interestOps & readInterestOp) == 0这段代码是什么意思呢？先这么理解，如果之前没有注册readInterestOp这样事件，就为false。结合下面这一段：interestOps | readInterestOp，这里指前面已经有注册一些事件，在那些事件的基础上，把readInterestOp（在这里是accept事件）这个事件也加上去。结合整个下面一段代码：
+>
+> ``` java
+> if ((interestOps & readInterestOp) == 0) {
+>   selectionKey.interestOps(interestOps | readInterestOp);
+> }
+> ```
+>
+> 如果之前没有注册过readInterestOp这样的事件，就把readInteresOp这样的事件注册进去（添加进去），并且之前的事件不受影响。绑定成功之后就要告诉selector它需要关心accept事件，selector下次有这个事件就会交给netty处理。
+>
+> **难道在accept之前还有别的事件？**
+>
+> 我们再次来理解一下doBegainRead 的read，read就是可读了，读什么，在这里就是读accept事件，也就是新连接。
+
