@@ -238,6 +238,8 @@ SelectionKey key = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT
 
 ![image-20240424224152014](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240424224152014.png)
 
+需要注意的是，看上面代码，可以看到selector是保存到NioEventLoop中的。那问题就来了，nioEventLoop创建的时机是什么？
+
 > jdk原生的这个方法是什么含义？
 >
 > selector当轮训到这个channel上面有的io操作的时候，可以直接将attachment拿出来，针对netty的niochannel做一些事件的传播处理 
