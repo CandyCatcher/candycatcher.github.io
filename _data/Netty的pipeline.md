@@ -226,7 +226,90 @@ handler是被handleContext包装的。
 
 # inBound事件传播
 
-先看ChannelHandler怎么源码：
+## 何为inBound事件
+
+先看ChannelHandler的源码：
+
+<img src="https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240520092514099.png" alt="image-20240520092514099" style="zoom:67%;" />
+
+接口就是定义规范，这里定义了最基本的，add，remove，exception发生各自的回调。
+
+ChannelHandlerAdapter就是实现了isSharable方法。如果实现是shareable，则返回true，因此可以添加到不同的link ChannelPipeline。
+
+![image-20240520093142277](https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240520093142277.png)
+
+然后我们看ChannelInboundHandler，这个类的作用主要是当channel状态更改的时候回调到用户。
+
+<img src="https://raw.githubusercontent.com/candyboyou/imgs/master/imgs/image-20240520094827163.png" alt="image-20240520094827163" style="zoom:67%;" />
+
+它为ChannelHandler状态更改添加回调。这使用户可以轻松地挂钩到状态更改。
+
+## ChannelRead事件的传播
+
+我们以ChannelRead事件为例来分析inBound事件：
+
+``` java
+public final class Server {
+
+    public static void main(String[] args) throws Exception {
+        EventLoopGroup bossGroup = new NioEventLoopGroup(1);
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
+
+        try {
+            ServerBootstrap b = new ServerBootstrap();
+            b.group(bossGroup, workerGroup)
+                .channel(NioServerSocketChannel.class)
+                .childOption(ChannelOption.TCP_NODELAY, true)
+                .childAttr(AttributeKey.newInstance("childAttr"), "childAttrValue")
+                .childHandler(new ChannelInitializer<SocketChannel>() {
+                    @Override
+                    public void initChannel(SocketChannel ch) {
+                        ch.pipeline().addLast(new InBoundHandlerA());
+                        ch.pipeline().addLast(new InBoundHandlerB());
+                        ch.pipeline().addLast(new InBoundHandlerC());
+                    }
+                });
+
+            ChannelFuture f = b.bind(8888).sync();
+
+            f.channel().closeFuture().sync();
+        } finally {
+            bossGroup.shutdownGracefully();
+            workerGroup.shutdownGracefully();
+        }
+    }
+}
+```
+
+每个InBoundHandlerX()，X代表A或者B或者C，里面都是这样实现的：
+
+``` java
+public class InBoundHandlerA extends ChannelInboundHandlerAdapter {
+ 
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        System.out.println("InBoundHandlerA: " + msg);
+        ctx.fireChannelRead(msg);
+    }
+}
+```
+
+运行之后，我们telnet一下本地端口8888，能得到一下结果：
+
+``` java
+InBoundHandlerA: hello world
+InBoundHandlerB: hello world
+InBoundHandlerC: hello world
+```
+
+
+这说明，InBound事件的传播，是按照添加顺序来的。
+
+也就是Head-->A-->B-->C--->Tail
+
+那么我们进入HeadContext的ChannelRead，有新连接进来之后先调用这个方法：
+
+
 
 # OutBound事件传播
 
