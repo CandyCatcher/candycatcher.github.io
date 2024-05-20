@@ -309,9 +309,61 @@ InBoundHandlerC: hello world
 
 那么我们进入HeadContext的ChannelRead，有新连接进来之后先调用这个方法：
 
+![image-20240520232302637](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240520232302637.png)
 
+这里没做什么，直接传递事件下去，怎么传递下去？点击查看fireChannelRead的源码：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240520232808891.png" alt="image-20240520232808891" style="zoom:67%;" />
+
+这个源码说明了，inbound是按照添加的顺序执行的，因为每一个都找next指针的节点。这段逻辑是什么呢？如果是inbound处理器，ctx=ctx.next的ctx就可以返回了，也就是，如果是inbound处理器，就返回。我们怎么知道是inbound呢，就通过inbound标识。
+
+看isInbound怎么实现，太简单：
+
+![image-20240520233725181](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240520233725181.png)
+
+继续查看invokeChannelRead源码：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240520234116358.png" alt="image-20240520234116358" style="zoom:50%;" />
+
+在这里是inEventLoop，所以继续进入，`next.invokeChannelRead(m)`，到达这里：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240520234253742.png" alt="image-20240520234253742" style="zoom:67%;" />
+
+找到InBoundHandlerA的实现，我们可以发现进到它的这个方法了：
+
+
+
+我们看一下tail的ChannelRead事件：
+
+![image-20240520234937211](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimgimage-20240520234937211.png)
+
+继续：
+
+![image-20240520235018888](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240520235018888.png)
+
+它就是不处理，打印日志提示你没有处理这个事件，并且释放资源。每次用户代码处理完之后，如果不传播到tail节点，都要自己释放资源，那么有没有自动释放资源的办法的?答案当然有，继承以下类：
+
+> 试一下
+
+## SimpleInBoundHandler处理器
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimgimage-20240520235534356.png" alt="image-20240520235534356" style="zoom: 50%;" />
+
+看channelRead方法，通过channelRead0()执行具体的逻辑，最后有一个释放的过程。所以用户代码继承他，是覆盖channelRead0()方法执行具体的逻辑。
 
 # OutBound事件传播
+
+分析完inbound事件传播之后，outbound事件其实很简单，我们分以下几点解析：
+
+## 何为outBound事件
+
+包含bind、connect、disconnect方法、close、deregister、read、write、flush等方法，这些方法更多的是主动向用户发起的操作。
+
+（而inBound事件更多的是事件的触发，如register、readComplete、active，比较被动的）
+
+## outbound事件传播机制
+
+## ctx.channel().write()和ctx.write()的区别
 
 为什么会从用户代码的addLast进来呢？
 
