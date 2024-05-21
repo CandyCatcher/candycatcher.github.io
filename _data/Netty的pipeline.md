@@ -363,7 +363,47 @@ InBoundHandlerC: hello world
 
 ## outbound事件传播机制
 
+用个例子
+
+![image-20240521231532003](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521231532003.png)
+
+C的write方法和AB一样，和他们不同的是C是事件传播的来源，只要它被添加进去，就发起写事件，也就是典型的outbound事件。我们从ctx.channel().write("hello world")开始进入：
+
+![image-20240521231319328](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521231319328.png)
+
+点进write来到defultChannelPipeline：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521231647664.png" alt="image-20240521231647664" style="zoom:67%;" />
+
+从代码里可以看到事件是从尾节点也就是TailContext开始传播的。
+
+一直进入：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521232011019.png" alt="image-20240521232011019" style="zoom:50%;" />
+
+点进findContextOutbound方法，查找下一个节点。也可以看到是从tail节点往前找的：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521232106755.png" alt="image-20240521232106755" style="zoom:67%;" />
+
+找到节点了，执行wirte操作：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521232430559.png" alt="image-20240521232430559" style="zoom:50%;" />
+
+进入`invokeWrite0`方法
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521232720829.png" alt="image-20240521232720829" style="zoom:50%;" />
+
+查找write的各自实现，如果是tail就是调用父类AbstractChannelHandlerContext的方法，直接找到prev，然后传播，传播到我们自己的类的时候，调用我们的方法。最后到了Head，就调用底层unsafe进行真正的写操作：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240521233131077.png" alt="image-20240521233131077" style="zoom: 50%;" />
+
 ## ctx.channel().write()和ctx.write()的区别
+
+从刚刚分析的源码中我们可以看到，ctx.channel().write()会从尾节点传递，经过所有的outboundhandler。
+
+而ctx.write()从当前节点开始传播（不包括当前节点，因为它首先会找到当前节点的下一个节点在执行write操作）。
+
+> 异常处理例子，一定要最后exception吗？
 
 为什么会从用户代码的addLast进来呢？
 
