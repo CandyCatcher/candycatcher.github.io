@@ -681,7 +681,7 @@ bitmap里面如果值为1，就说明被分配了，如果为0就未分配，后
 
 prev和next指针，说明subpage之间也就通过双向链表链接的。
 
-#### page级别的内存分配
+### page级别的内存分配
 
 还是看`allocate`方法，跳过前面的代码，直接来到这里，if里面是对缓存的分配。如果缓存找不到的话，就调用`allocateNoraml`方法进行page级别内存的分配。
 
@@ -729,13 +729,13 @@ prev和next指针，说明subpage之间也就通过双向链表链接的。
 
    在进入PoolChunk方法：
 
-   ![image-20240612233534352](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240612233534352.png)
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240612233534352.png" alt="image-20240612233534352" style="zoom:50%;" />
 
    1右移11位，maxSubpageAllocs是2048；maxSubpageAllocs右移1位是4096，所以整个memoryMap和depthMap的大小为4096大小。
 
    接着看后面的双重for循环。
 
-   ![image-20240612233907327](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240612233907327.png)
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240612233907327.png" alt="image-20240612233907327" style="zoom: 25%;" />
 
    memoryMap就是一个完全二叉树，里面有11层，对应maxOrder；memoryMapIndex就是从上往下、从左往右数下去的第几个节点；d就是树的深度，p就是树的每一层的数量。depthMap和memoryMap一样分析。通过这个双重for循环，最终我们会分配到一个memoryMap，一共有4096个节点，每个节点的值为树的深度，也就是memoryMap={0,1,1,2,2,2,2,3,3,3,3,3,3,3,3，...，...11}。
 
@@ -743,4 +743,252 @@ prev和next指针，说明subpage之间也就通过双向链表链接的。
 
    也就是说拿到chunk一块连续内存之后，需要将对应的一个标记打到PolledByteBuf上面。`c.initBuf`就是来做这个事情。
 
+   第二步创建完chunk之后，就来这里在chunk上面分配一块内存:
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615185947094.png" alt="image-20240615185947094" style="zoom:50%;" />
+
+   normalCapacity的大小是16k
+
+   点击进入allocateRun：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615190112673.png" alt="image-20240615190112673" style="zoom:50%;" />
+
+   首先通过第一行的算法，计算出d，d的值为10。也就是是在二叉树的第10层。然后通过allocateNode找到一个空闲节点：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615190701790.png" alt="image-20240615190701790" style="zoom:50%;" />
+
+   i我们从id为1开始找，找到合适的id，也就是memory数组里面的第id位，这个id位就是我们可以分配的内存。看value(id)：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615192927681.png" alt="image-20240615192927681" style="zoom: 67%;" />
+
+   这个方法就是读出memory第id位的值。
+
+   然后在循环中，每次将id乘以2，一直到1024。通过上面的图，每次检查的就是每一层的第一个节点，我们可以计算出着16k的内存适合分配在memory的第1024位，也是正确的。
+
+   然后还得逐层往上依次设置为已使用，如果不这样做，下次要分配一块8M的内存，到了第二层发现没有被使用，直接使用了第二层的第一块，这是不符合要求的。
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615194606706.png" alt="image-20240615194606706" style="zoom:50%;" />
+
+   知道handle是哪一个节点了，接着将PooledByteBuf需要的内存指向chunk的内存：
+
+   ![image-20240615195149496](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615195149496.png)
+
+   由于handle就是索引，所以memoryMapIdx就是1024，然后bitmapIdx为0，这个是subpage用到的。
+
+   `value(memoryMapIdx)`作用就是检查一下是否已被使用。
+
+   然后进入`buf.init`方法，首先这里有两个重要的方法：runOffset和runLength。
+
+   runOffset的值为0，表明没有偏移量。runLength是16k，表明我们第1024个节点的大小为16k。
+
+   然后看`init`方法：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615200305545.png" alt="image-20240615200305545" style="zoom:50%;" />
+
+   这里就是把chunk的内存分配给bytebuf，this.chunk=chunk，代表指向哪一块chunk，handle，指向的chunk里面的哪一个位置，memory，哪一块内存，偏移量offset为0（page级别分配没有偏移量，subpage才有），大小length16384也就是16k。
+
+   接着回到：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615200501232.png" alt="image-20240615200501232" style="zoom:50%;" />
+
+   初始化memoryAddress:
+
+   ![image-20240615200700661](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615200700661.png)
+
+   这样就分配完成了。
+
+### subPage级别的内存分配
+
+subpage级别的内存分配的主要方法为：allocateTiny()。
+
+主要分为以下三个步骤：
+
+1. 定位一个subpage对象
+
+   假设分配的内存是16个字节。
+
+   ![image-20240615201436433](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615201436433.png)
+
+   看一下`tinyIdx(normaCapacity)`，就是normCapacity除以16:
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615201608879.png" alt="image-20240615201608879" style="zoom:50%;" />
+
+   接着看一下tinySubpagePools赋给table。这个是什么意思呢？先看tinySubpagePools的构成，其实和之前MemoryRegionCache的tiny类型的组成类似，是由一个从0到496B的数组组成的：
+
+   ![image-20240615201848703](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615201848703.png)
+
+   由于tinySubpagePools是以0为首项，16为公差的等差数列。16右移4位也就是16除以16就是1，所以取tinySubpagePools的第二位，也就是tableIdx=1。
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615202637445.png" alt="image-20240615202637445" style="zoom:50%;" />
+
+   默认情况下head是没有任何subpage信息的，s指向了head，接着会直接走到allocateNormal方法：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615203442888.png" alt="image-20240615203442888" style="zoom:50%;" />
+
+   这个方法和page的内存分配方法一样，不同在allocate方法中：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615203645531.png" alt="image-20240615203645531" style="zoom:67%;" />
+
+   进入`allocateSubpage()`：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615204028926.png" alt="image-20240615204028926" style="zoom:50%;" />
+
+   第一行获取subpagePool的head就是16B这个节点。
+
+   然后将maxOrder复制给d，maxOrder的值为11。有一段注释：
+
+   `subpages are only be allocaed from pages i.e.,leaves d:11`。这里就是说，subpage只能从叶子节点也就是8k为单位的节点分配。
+
+   接着在11层分配一个节点，id为2048。
+
+   接着获取PoolChunk的subpages，PoolChunk和subpage是什么关系呢？
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615205058894.png" alt="image-20240615205058894" style="zoom:50%;" />
+
+   我们知道chunk里面是以page为单位进行内存分配， 那在初始化chunk的时候，同时初始化了一个叫subpages这么一个对象。subpage0表示第一个page、subpage1表示第二个page。 那如果把一个page当做subpage进行分配的时候， 那么subpages对应的值是不为空的。 表示当前这个节点是当作subpage进行分配。
+
+   接着看代码，当subpage创建出来后复制给subpages：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615210435209.png" alt="image-20240615210435209" style="zoom:50%;" />
+
+   然后看一下PoolSubpage：
+
+   ![image-20240615210530637](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615210530637.png)
+
+   同样的，要给chunk赋值，让PoolSubpage知道自己属于哪个chunk。然后属于memoryMapIdx里面的第几个memoryMapIdx，偏移量是多少，pageSize的大小为8192也就是8k。
+
+   然后需要注意的是init方法：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimgimage-20240615210719943.png" alt="image-20240615210719943" style="zoom:50%;" />
+
+   elemSize=16，根据需要分配的大小，把pageSize分配为多少等分：`maxNumElems=numAvail=pageSize/elemSize;`
+
+   剩下的还有个bitmap，那么bitmap什么意思？
+
+   既然已经划分为多份了，那么还要标记哪一个子page已经被分配了。未使用就标记为0，使用就标记为1，这里是初始化，所以都是未使用，都为0。
+
+   最后将新建的PoolSubpage添加到队列中：
+
+   ![image-20240615211607302](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615211607302.png)
+
+   也就是addToPool方法：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615211644696.png" alt="image-20240615211644696" style="zoom:50%;" />
+
+2. 初始化subpage
+
+   subpage初始化后，就可以取出一个子page了：
+
+   ![image-20240615212037380](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615212037380.png)
+
+   进入allocate方法：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615212139905.png" alt="image-20240615212139905" style="zoom:50%;" />
+
+   这个方法的作用就是从bitmap中取出那么没有被分配的一个子page。如果可用的subpage数量为0，那么就将这个subpage从pool中删除。接着讲bitmapIdx转换成Handle：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615212546065.png" alt="image-20240615212546065" style="zoom:60%;" />
+
+   他的意思就是讲memoryMapIdx作为低32位、bimapIdx作为高32位：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615212748054.png" alt="image-20240615212748054" style="zoom:50%;" />
+
+   
+
+3. 初始化pooledByteBuf
+
+   接着回到allocate方法，进行pooledByteBuf的初始化：
+
+   <img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615213021628.png" alt="image-20240615213021628" style="zoom: 50%;" />
+
+   我们看runOffset(memoryMapIdx)+(bitmapIdx&0X3FFFFFFF)*subpage.elemSize这个表达式的值：
+
+   runOffset(memoryMapIdx)因为没有偏移量，所以为0（因为是page的第一个节点，page没有偏移）；(bitmapIdx&0X3FFFFFFF)为page的初始位置，如果现在是page里面的第1块，所以(bitmapIdx&0X3FFFFFFF)为0，如果是第2块，(bitmapIdx&0X3FFFFFFF)为1，乘上subpage.elemSize也就是16b之后，偏移量也是对的。
+
+   page的偏移加上subpage的偏移，最终就是真个内存的偏移量。把这个偏移量传递给buf，那buf在进行内存读写的时候，就可以基于这个偏移量进行内存的读写，通过这些值去初始化buf。
+
 # 内存的回收过程
+
+来到了AbstractReferenceCountedByteBuf的release方法，最终无论那种byteBuffer，都会调用到它的`release0()`方法：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615214544938.png" alt="image-20240615214544938" style="zoom:50%;" />
+
+当refCnt和decrement相同的时候，也就是当前的引用数和需要减去的引用数相同，那么就是调用deallocate()方法释放内存了。这里的refCnt和decrement都为1，所以进入了`deallocate()`方法:
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615215038387.png" alt="image-20240615215038387" style="zoom:50%;" />
+
+在这里将handle置为-1，不指向任何地方，memory也就是内存块也指向空。
+
+ByteBuf内存的释放分为两个阶段：
+
+* `chunk.arena.free(chunk, handle, maxLength, cache);`是第一个阶段（释放内存）
+* `recycle()`是第二个阶段。
+
+两个阶段解释为：
+
+1. 内存释放
+
+   这里分两种情况：
+
+   * 连续的内存区段加到缓存
+   * 标记这段连续的内存区段为未使用
+
+   这里的逻辑是，如果添加连续的内存区段到缓存成功，那就直接进行第二阶段；如果添加到缓存未成功，有可能是缓存满了或者别的原因，那么就标记这段连续的内存区段为未使用。
+
+   page级别的话是通过二叉树方式标记（层数标记为原来的层数就是未使用），subpage的级别通过位图的的方式标记（bitmap为0就是未使用）。
+
+2. ByteBuf加到对象池
+
+   对象池里面ByteBuf一开始是没有的，ByteBuf释放之后必会被立即销毁，而是放到对象池里面，对象池才有ByteBuf。
+
+接着看代码，从free方法进入：
+
+![image-20240615215940649](https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615215940649.png)
+
+由于例子是pooled，所以是else的逻辑。
+
+首先通过sizeClass方法获取capacity的类型。
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimgimage-20240615220737333.png" alt="image-20240615220737333" style="zoom:50%;" />
+
+首先cache方法就是拿到对应的memoryRegionCache。
+
+进入cache方法：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615221351305.png" alt="image-20240615221351305" style="zoom:50%;" />
+
+因为sizeClass是tiny的，所以进入对应分支：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615221437294.png" alt="image-20240615221437294" style="zoom:50%;" />
+
+这个方法前面已经分析过，通过数组索引的方式拿到cache节点。
+
+然后将chunk以及对应的handle封装并放到队列中：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimgimage-20240615221735057.png" alt="image-20240615221735057" style="zoom:50%;" />
+
+之前从缓存中拿到一个entry后，将entry放在recycle池子中的。这里是从池子中获取newEntry：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615222051785.png" alt="image-20240615222051785" style="zoom:50%;" />
+
+拿出来将chunk、handle进行赋值。驾到队列中并返回。
+
+如果添加缓存失败，
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615222254186.png" alt="image-20240615222254186" style="zoom:50%;" />
+
+ 看这个free方法：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615222341381.png" alt="image-20240615222341381" style="zoom:50%;" />
+
+在进入`chunk.free(handle)`：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615222509600.png" alt="image-20240615222509600" style="zoom:50%;" />
+
+这一段的逻辑就是找出memoryMapIdx定位chunk里面的位置，找出bitmapIdx看看是不是subpage，如果是将走bitmapIdx!=0这个条件里面的内容，把bitmap为1的置为0，就是一个反向过程。subpage是通过bitmap来分配的，page是通过完全二叉树找到对应的里面的节点去分配。最后也是一个反向过程，把memoryMap里面相应的位置标记为未使用，并把父节点符合条件的也标记为未使用。
+
+最后回到deallocate方法：
+
+<img src="https://cdn.jsdelivr.net/gh/candyboyou/imgs/imgimage-20240615223235555.png" alt="image-20240615223235555" style="zoom:50%;" />
+
+把当前的byteBuffer加入到对象池中。
